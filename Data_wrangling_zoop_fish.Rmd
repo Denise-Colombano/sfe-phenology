@@ -1,0 +1,1895 @@
+---
+title: "Data_wrangling_zoop_fish"
+author: "Denise-Colombano"
+date: "05/03/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# load libraries
+```{r}
+library(tidyverse)
+library(ggridges)
+
+library(zooper)
+library(LTMRdata)
+
+# update Zooper package
+#devtools::install_github("InteragencyEcologicalProgram/zooper")
+
+# update LTMRdata
+#devtools::install_github("sbashevkin/LTMRdata")
+
+
+library(DT)
+library(leaflet)
+library(sf)
+library(janitor)
+
+library(tidygraph)
+library(sfnetworks)
+```
+
+# Import data from Zooper
+```{r}
+MyZoops <- Zoopsynther(Data_type = "Community", 
+                       Sources = "EMP")
+View(MyZoops)
+
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+set.seed(16)
+
+# MyZoops%>%
+#   filter(!is.na(SalSurf))%>%
+#   mutate(Salinity_zone=case_when(
+#     SalSurf < 0.5 ~ "Freshwater",
+#     SalSurf > 0.5 & SalSurf < 6 ~ "Low salinity zone",
+#     SalSurf > 6 ~ "High salinity zone"
+#   ))%>%
+#   mutate(Salinity_zone=factor(Salinity_zone, levels=c("Freshwater", "Low salinity zone", "High salinity zone")))%>%
+#   group_by(Year,Phylum, Class, Order, Family, Genus, Species, Lifestage, Taxlifestage, Salinity_zone)%>%
+#   summarise(CPUE=mean(CPUE, na.rm=T))%>%
+#   ungroup()%>%
+#   arrange(Phylum, Class, Order, Family, Genus, Species, Lifestage)%>%
+#   mutate(Taxlifestage=factor(Taxlifestage, unique(Taxlifestage)))%>%
+#   ggplot(aes(x=Year, y=CPUE))+
+#   geom_bar(stat="identity", color="white", size=0.01, aes(fill=Taxlifestage))+
+#   facet_wrap(~Salinity_zone, nrow=1)+
+#   coord_cartesian(expand=0)+
+#   scale_x_continuous(breaks = function(x) unique(floor(pretty(seq(min(x), max(x)), n=3))), expand=c(0,0))+
+#   scale_fill_manual(values=sample(colorRampPalette(brewer.pal(12, "Set3"))(length(unique(MyZoops$Taxlifestage)))), 
+#                     name="Taxa and life stage", 
+#                     guide = guide_legend(ncol=3, title.position = "top", title.hjust = 0.5))+
+#   ylab(bquote(Average~CPUE~"("*Catch*"/"*m^3*")"))+
+#   theme_bw()+
+#   theme(panel.grid=element_blank(), text=element_text(size=14), legend.text = element_text(size=8), 
+#         legend.key.size = unit(10, "points"), strip.background=element_blank(), legend.position = "bottom", 
+#         legend.background = element_rect(color="black"), axis.text.x=element_text(angle=45, hjust=1))
+
+
+MyZoopsOrders <- MyZoops %>% 
+  distinct(Order)
+MyZoopsPhylum <- MyZoops %>% 
+  distinct(Phylum)
+```
+
+# Filter zoops
+```{r}
+# Filter out taxa of interest - using the mesozooplankton net
+MyZoopsT <- MyZoops %>% 
+  filter(
+    Order == "Calanoida" |
+      Order == "Cyclopoida" | 
+      Order == "Cladocera" | 
+      Order == "Mysida" |
+      Phylum == "Rotifera"
+  )  %>% 
+  filter(!is.na(SalSurf))%>%
+  mutate(Salinity_zone=case_when(
+    SalSurf < 0.5 ~ "Freshwater",
+    SalSurf > 0.5 & SalSurf < 6 ~ "Low salinity zone",
+    SalSurf > 6 ~ "High salinity zone"
+  ))%>%
+  mutate(Salinity_zone=factor(Salinity_zone, levels=c("Freshwater", 
+                                                      "Low salinity zone", 
+                                                      "High salinity zone"))) %>% 
+  mutate(Period= case_when(
+    Year < 1987 ~ "Period1",
+    Year >= 1987 & Year <= 1994 ~ "Period2",
+    Year >= 1995 & Year <= 2006 ~ "Period3",
+    Year >= 2007 & Year <= 2016 ~ "Period4",
+    Year > 2016 ~ "Period5"
+  )) %>% 
+  mutate(Year=lubridate::year(Date), Julian=lubridate::yday(Date), Month=lubridate::month(Date))
+head(MyZoopsT)
+dim(MyZoopsT)
+
+# Filter out core stations
+zoop_month <- read_csv("data/stations/stations_zoop_month.csv") %>% 
+  mutate(Category="Zoop", Survey="EMP Zoop")
+
+# Match them - only core stations (n=15)
+MyZoopsF <- MyZoopsT %>% 
+  right_join(zoop_month)
+ 
+head(MyZoopsF)
+dim(MyZoopsF)
+
+MyZoopsMeso <- MyZoopsF %>% 
+  filter(SizeClass == "Meso")
+
+MyZoopsMacro <- MyZoopsF %>% 
+  filter(SizeClass == "Macro")
+```
+
+# Map
+```{r}
+library(DT)
+library(leaflet)
+library(sf)
+library(janitor)
+
+# 15 core stations
+MyZoopsMap <- MyZoopsF %>% 
+  distinct(Source, Station, Latitude, Longitude) %>% 
+  arrange(desc(Longitude))
+
+leaflet() %>% 
+  addTiles() %>% 
+    addCircleMarkers(data = MyZoopsMap, 
+                         lat = ~Latitude,
+                         lng = ~Longitude,
+                         radius = 4,
+                         weight = 0.1,
+                          color= "black",
+                          fillOpacity = 0.7)
+```
+
+## sampling density
+```{r}
+# Which months were consistently sampled over time?
+# Sampling <- MyZoopsF %>% 
+#   mutate(Month=lubridate::month(Date), Year=lubridate::year(Date)) %>% 
+#   group_by(Station, Month, Year) %>% 
+#   summarize(totCPUE=sum(CPUE)) %>%
+#   group_by(Station, Year) %>% 
+#   summarize(Months=tally(Month))
+
+Sampling <- MyZoopsF %>% 
+  select(Source, SizeClass, Station, Date, Julian, Month) %>% 
+  distinct() %>% 
+  mutate(Year=lubridate::year(Date)) %>% 
+  filter(!is.na(Year)) %>% 
+  filter(SizeClass=="Meso")
+
+ggplot(Sampling, aes(Julian))+
+  geom_histogram(binwidth =1, aes(fill=Station))+
+  facet_wrap(Year~.)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  labs(title="Zoop", subtitle="Meso")
+
+Sampling_b <- MyZoopsF %>% 
+  select(Source, SizeClass, Station, Date, Julian, Month) %>% 
+  distinct() %>% 
+  mutate(Year=lubridate::year(Date)) %>% 
+  filter(!is.na(Year)) %>% 
+  filter(SizeClass=="Meso", Year==2015)
+
+ggplot(Sampling_b, aes(Julian))+
+  geom_histogram(binwidth =1, aes(fill=Station))+
+  #facet_wrap(~.)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  labs(title="Zoop 2015", subtitle="Meso")
+```
+
+
+# Groups
+
+## calanoida
+```{r}
+Calanoida <- MyZoopsMeso %>% 
+  filter(Order=="Calanoida") %>% 
+  mutate(Year=lubridate::year(Date), Julian=lubridate::yday(Date))
+
+ggplot(Calanoida, aes(Julian, CPUE))+
+  geom_point(aes(color=Taxlifestage))+
+  facet_grid(Year~Taxlifestage)
+
+Calanoida_genus <- Calanoida %>% 
+  filter(Genus=="Pseudodiaptomus" |
+           Genus=="Eurytemora" | 
+           Genus == "Sinocalanus" | 
+           Genus == "Acartiella") %>% 
+  group_by(Genus, Julian, Year, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+ggplot(Calanoida_genus, aes(Julian, meanCPUE, group=Year))+
+  geom_line(aes(color=Year), alpha=0.7)+
+  facet_grid(Genus~Salinity_zone, scales = "free_y")+
+  scale_color_viridis_c()+
+  labs(title="Calanoida", x="Julian date")
+```
+
+## cyclopoida
+```{r}
+Cyclopoida <- MyZoopsMeso %>% 
+  filter(Order=="Cyclopoida") %>% 
+  mutate(Year=lubridate::year(Date), Julian=lubridate::yday(Date))
+
+ggplot(Cyclopoida, aes(Julian, CPUE))+
+  geom_point(aes(color=Taxlifestage))+
+  facet_grid(Year~Taxlifestage)
+
+Cyclopoida_genus <- Cyclopoida %>% 
+  filter(Genus=="Acanthocyclops" |
+           Genus=="Limnoithona" |
+           Genus =="Oithona" ) %>% 
+  group_by(Genus, Julian, Year, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+ggplot(Cyclopoida_genus, aes(Julian, meanCPUE, group=Year))+
+  geom_line(aes(color=Year), alpha=0.7)+
+  facet_grid(Genus~Salinity_zone, scales = "free_y")+
+  scale_color_viridis_c()+
+  labs(title="Cyclopoida", x="Julian date")
+```
+
+
+## cladocera
+```{r}
+Cladocera <- MyZoopsMeso %>% 
+  filter(Order=="Cladocera") %>% 
+  mutate(Year=lubridate::year(Date), Julian=lubridate::yday(Date))
+
+ggplot(Cladocera, aes(Julian, CPUE))+
+  geom_point(aes(color=Taxlifestage))+
+  facet_grid(Year~Taxlifestage)
+
+Cladocera_genus <- Cladocera %>% 
+  filter(Species == "Bosmina longirostris" | # only species IDed
+           Taxname == "Daphnia_UnID") %>% #Daphnia
+  group_by(Taxname, Julian, Year, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE)) %>% 
+  mutate(Taxname2= ifelse(Taxname=="Daphnia_UnID", "Daphnia spp.", Taxname))
+
+ggplot(Cladocera_genus, aes(Julian, meanCPUE, group=Year))+
+  geom_line(aes(color=Year), alpha=0.7)+
+  facet_grid(Taxname2~Salinity_zone, scales = "free_y")+
+  scale_color_viridis_c()+
+  labs(title="Cladocera", x="Julian date")
+```
+
+
+## mysida
+```{r}
+Mysida <- MyZoopsMacro %>% 
+  filter(Order=="Mysida") %>% 
+  mutate(Year=lubridate::year(Date), Julian=lubridate::yday(Date))
+
+ggplot(Mysida, aes(Julian, CPUE))+
+  geom_point(aes(color=Taxlifestage))+
+  facet_grid(Year~Taxlifestage)
+
+Mysida_genus <- Mysida %>% 
+  filter(Genus == "Alienacanthomysis" |
+           Genus == "Hyperacanthomysis" |
+           Genus == "Neomysis" |
+           Genus == "Orientomysis") %>% 
+  group_by(Genus, Julian, Year, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+ggplot(Mysida_genus, aes(Julian, meanCPUE, group=Year))+
+  geom_line(aes(color=Year), alpha=0.7)+
+  facet_grid(Genus~Salinity_zone, scales = "free_y")+
+  scale_color_viridis_c()+
+  labs(title="Mysida", x="Julian date")
+```
+
+
+## rotifera
+```{r}
+Rotifera <- MyZoopsF %>% 
+  filter(Phylum=="Rotifera") %>% 
+  mutate(Year=lubridate::year(Date), Julian=lubridate::yday(Date))
+
+ggplot(Rotifera, aes(Julian, CPUE))+
+  geom_point(aes(color=Taxlifestage))+
+  facet_grid(Year~Taxlifestage)
+
+Rotifera_genus <- Rotifera %>% 
+  group_by(Taxlifestage, Julian, Year, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+ggplot(Rotifera_genus, aes(Julian, meanCPUE, group=Year))+
+  geom_line(aes(color=Year), alpha=0.7)+
+  facet_grid(.~Salinity_zone, scales = "free_y")+
+  scale_color_viridis_c()+
+  labs(title="Rotifera", x="Julian date")
+```
+
+
+# Species
+
+## Mesozooplankton
+
+### Calanoid and cyclopoids
+```{r}
+# Preliminary analysis - by drought vs. non-drought period
+# Filter species of interest
+MyZoopsMeso_SppMonth <- MyZoopsMeso %>% 
+  filter(Species == "Eurytemora affinis" |
+          Species == "Pseudodiaptomus forbesi" |
+           Species=="Sinocalanus doerrii" |
+           Species=="Limnoithona tetraspina" |
+           Species=="Limnoithona tetraspina") %>%
+  group_by(Species, Month, Period,Year) %>% #, Period
+  summarize(meanCPUE=mean(CPUE, na.rm=T))
+
+# Identify the peaks for each species x period combination
+SppMonth_peaks <- MyZoopsMeso_SppMonth %>% 
+  ungroup() %>%
+  filter(Month>2 & Month < 11) %>% 
+  group_by(Species, Period,Month) %>% #Period, 
+  summarize(meanCPUE=median(meanCPUE)) %>% # median
+  filter(meanCPUE== max(meanCPUE)) %>% 
+  filter(meanCPUE != 0)
+
+# Plot monthly trends for all years
+ggplot(MyZoopsMeso_SppMonth, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_vline(data=SppMonth_peaks, aes(xintercept = Month), lty=2, col="red")+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(Species~Period, scales = "free_y")+ #Period
+  xlim(2.5,10.5)+
+  scale_fill_viridis_c()+
+  labs(title="Common mesozooplankton species")
+
+
+# Identify the peaks but with standardized CPUE values for each species
+SppMonth_z <- MyZoopsMeso_SppMonth %>% 
+  ungroup() %>%
+  filter(Month>2 & Month < 11) %>% 
+  group_by(Species,Period,Month) %>% 
+  summarize(meanCPUE=mean(meanCPUE)) %>%
+  group_by(Species, Period) %>% 
+  mutate(meanCPUE2= mean(meanCPUE, na.rm=T), sd=sd(meanCPUE, na.rm = T)) %>% 
+  mutate(CPUEz= (meanCPUE - meanCPUE2) / sd) %>% 
+  ungroup()
+
+SppMonth_peaks_z <- SppMonth_z %>% 
+  group_by(Species, Period) %>% 
+  filter(CPUEz== max(CPUEz)) %>% 
+  filter(CPUEz != 0)
+
+# zscore CPUE
+ggplot(SppMonth_z, aes(x=Month, y=CPUEz, height=CPUEz, group=Period, fill=Period))+
+  geom_hline(aes(yintercept=0), lty=2, col="gray50")+
+  geom_ridgeline(min_height = -5, stat="identity")+
+  facet_grid(.~Species)+
+  theme_bw()+
+  scale_fill_viridis_d(alpha=0.5)
+
+# mean CPUE
+ggplot(SppMonth_z, aes(x=Month, y=meanCPUE, height=meanCPUE, group=Period, fill=Period))+
+  geom_ridgeline(min_height = -2, stat="identity")+
+  facet_grid(.~Species)+
+  theme_bw()+
+  scale_fill_viridis_d(alpha=0.5)
+
+###
+# Next analysis - Identify peak timing for each year
+```
+
+### Cladocerans
+```{r}
+# Preliminary analysis - by drought vs. non-drought period
+# Filter species of interest
+MyZoopsMeso_SppMonth2 <- MyZoopsMeso %>% 
+  filter(Taxname == "Bosmina longirostris" |
+           Taxname == "Daphnia_UnID") %>%
+  group_by(Taxname, Month, Year, Period) %>% 
+  summarize(meanCPUE=mean(CPUE, na.rm=T)) %>% 
+  mutate(Taxname=ifelse(Taxname=="Daphnia_UnID", "Daphnia spp.", Taxname))
+
+# Identify the peaks for each species x period combination
+SppMonth_peaks2 <- MyZoopsMeso_SppMonth2 %>% 
+  ungroup() %>%
+  filter(Month>2 & Month < 11) %>% 
+  group_by(Taxname, Period, Month) %>% 
+  summarize(meanCPUE=median(meanCPUE)) %>% # median
+  filter(meanCPUE== max(meanCPUE)) %>% 
+  filter(meanCPUE != 0)
+
+# Plot monthly trends for each period
+ggplot(MyZoopsMeso_SppMonth2, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_vline(data=SppMonth_peaks2, aes(xintercept = Month), lty=2, col="red")+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(Taxname~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  scale_fill_viridis_c()+
+  labs(title="Common cladocerans")
+
+
+# Identify the peaks but with standardized CPUE values for each species
+SppMonth_z2 <- MyZoopsMeso_SppMonth2 %>% 
+  ungroup() %>%
+  filter(Month>2 & Month < 11) %>% 
+  group_by(Taxname,Period,Month) %>% 
+  summarize(meanCPUE=mean(meanCPUE)) %>%
+  group_by(Taxname, Period) %>% 
+  mutate(meanCPUE2= mean(meanCPUE, na.rm=T), sd=sd(meanCPUE, na.rm = T)) %>% 
+  mutate(CPUEz= (meanCPUE - meanCPUE2) / sd) %>% 
+  ungroup()
+
+SppMonth_peaks_z2 <- SppMonth_z2 %>% 
+  group_by(Taxname, Period) %>% 
+  filter(CPUEz== max(CPUEz)) %>% 
+  filter(CPUEz != 0)
+
+# zscore CPUE
+ggplot(SppMonth_z2, aes(x=Month, y=CPUEz, height=CPUEz, group=Period, fill=Period))+
+  geom_hline(aes(yintercept=0), lty=2, col="gray50")+
+  geom_ridgeline(min_height = -5, stat="identity")+
+  facet_grid(.~Taxname)+
+  theme_bw()+
+  scale_fill_viridis_d(alpha=0.5)
+
+# mean CPUE
+ggplot(SppMonth_z2, aes(x=Month, y=meanCPUE, height=meanCPUE, group=Period, fill=Period))+
+  geom_ridgeline(min_height = -2, stat="identity")+
+  facet_grid(.~Taxname)+
+  theme_bw()+
+  scale_fill_viridis_d(alpha=0.5)
+
+
+###
+# Next analysis - Identify peak timing for each year
+```
+
+
+## Macrozooplankton
+
+```{r}
+# Preliminary analysis - by drought vs. non-drought period
+# Filter species of interest
+MyZoopsMacro_SppMonth <- MyZoopsMacro %>% 
+  filter(Taxname == "Hyperacanthomysis longirostris" |
+           Taxname == "Neomysis kadiakensis" |
+           Taxname == "Neomysis mercedis") %>%
+  group_by(Taxname, Month, Year, Period) %>% 
+  summarize(meanCPUE=mean(CPUE, na.rm=T))
+
+# Identify the peaks for each species x period combination
+SppMonthMacro_peaks <- MyZoopsMacro_SppMonth %>% 
+  ungroup() %>%
+  filter(Month>2 & Month < 11) %>% 
+  group_by(Taxname, Period, Month) %>% 
+  summarize(meanCPUE=median(meanCPUE)) %>% # median 
+  filter(meanCPUE== max(meanCPUE)) %>% 
+  filter(meanCPUE != 0)
+
+# Plot monthly trends for each period
+ggplot(MyZoopsMacro_SppMonth, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_vline(data=SppMonthMacro_peaks, aes(xintercept = Month), lty=2, col="red")+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(Taxname~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  scale_fill_viridis_c()+
+  labs(title="Common macrozooplankton species")
+
+
+# Identify the peaks but with standardized CPUE values for each species
+SppMonthMacro_z <- MyZoopsMacro_SppMonth %>% 
+  ungroup() %>%
+  filter(Month>2 & Month < 11) %>% 
+  group_by(Taxname,Period,Month) %>% 
+  summarize(meanCPUE=mean(meanCPUE)) %>% 
+  group_by(Taxname, Period) %>% 
+  mutate(meanCPUE2= mean(meanCPUE, na.rm=T), sd=sd(meanCPUE, na.rm = T)) %>% 
+  mutate(CPUEz= (meanCPUE - meanCPUE2) / sd) %>% 
+  ungroup()
+
+SppMonth_peaks_z <- SppMonth_z %>% 
+  group_by(Taxname, Period) %>% 
+  filter(CPUEz== max(CPUEz)) %>% 
+  filter(CPUEz != 0)
+
+# zscore CPUE
+ggplot(SppMonthMacro_z, aes(x=Month, y=CPUEz, height=CPUEz, group=Period, fill=Period))+
+  geom_hline(aes(yintercept=0), lty=2, col="gray50")+
+  geom_ridgeline(min_height = -5, stat="identity")+
+  facet_grid(.~Taxname)+
+  theme_bw()+
+  scale_fill_viridis_d(alpha=0.5)
+
+# mean CPUE
+ggplot(SppMonthMacro_z, aes(x=Month, y=meanCPUE, height=meanCPUE, group=Period, fill=Period))+
+  geom_ridgeline(min_height = -2, stat="identity")+
+  facet_grid(.~Taxname)+
+  theme_bw()+
+  scale_fill_viridis_d(alpha=0.5)
+
+
+###
+# Next analysis - Identify peak timing for each year
+```
+
+# Species
+
+## Eury
+```{r}
+Eury <- MyZoopsMeso %>% 
+  filter(Species=="Eurytemora affinis") %>% 
+  mutate(Year=lubridate::year(Date), Julian=lubridate::yday(Date), Month=lubridate::month(Date))
+
+Eury_mean <- Eury %>% 
+  group_by(Species, Julian, Year, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+ggplot(Eury_mean, aes(Julian, meanCPUE, group=Year))+
+  geom_line(aes(color=Year), alpha=0.7)+
+  facet_grid(.~Salinity_zone, scales = "free_y")+
+  scale_color_viridis_c()+
+  labs(title="Eurytemora affinis", x="Julian date")
+
+Eury_month <- Eury %>% 
+  group_by(Species, Month, Year, Period, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+# identify peak month in each period - TBD
+#Eury_peaks <- Eury_month %>% 
+ # group_by(Period)
+
+# monthly
+ggplot(Eury_month, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(.~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  labs(title="Eurytemora affinis")+
+  scale_fill_viridis_c()
+
+# with salinity
+ggplot(Eury_month, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(Salinity_zone~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  labs(title="Eurytemora affinis")+
+  scale_fill_viridis_c()
+```
+
+## Pseudo
+```{r}
+Pseudo <- MyZoopsF %>% 
+  filter(Species=="Pseudodiaptomus forbesi") %>% 
+  mutate(Year=lubridate::year(Date), Julian=lubridate::yday(Date), Month=lubridate::month(Date))
+
+Pseudo_mean <- Pseudo %>% 
+  group_by(Species, Julian, Year, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+ggplot(Pseudo_mean, aes(Julian, meanCPUE, group=Year))+
+  geom_line(aes(color=Year), alpha=0.7)+
+  facet_grid(.~Salinity_zone, scales = "free_y")+
+  scale_color_viridis_c()+
+  labs(title="Pseudodiaptomus forbesi", x="Julian date")
+
+Pseudo_month <- Pseudo %>% 
+  group_by(Species, Month, Year, Period, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+# identify peak month in each period - TBD
+
+# monthly
+ggplot(Pseudo_month, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(.~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  labs(title="Pseudodiaptomus forbesi")+
+  scale_fill_viridis_c()
+
+# with salinity
+ggplot(Pseudo_month, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(Salinity_zone~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  labs(title="Pseudodiaptomus forbesi")+
+  scale_fill_viridis_c()
+```
+
+## Sino
+```{r}
+Sino <- MyZoopsF %>% 
+  filter(Species=="Sinocalanus doerrii") %>% 
+  mutate(Year=lubridate::year(Date), Julian=lubridate::yday(Date), Month=lubridate::month(Date))
+
+Sino_mean <- Sino %>% 
+  group_by(Species, Julian, Year, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+ggplot(Sino_mean, aes(Julian, meanCPUE, group=Year))+
+  geom_line(aes(color=Year), alpha=0.7)+
+  facet_grid(.~Salinity_zone, scales = "free_y")+
+  scale_color_viridis_c()+
+  labs(title="Sinocalanus doerrii", x="Julian date")
+
+Sino_month <- Sino %>% 
+  group_by(Species, Month, Year, Period, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+# identify peak month in each period - TBD
+
+# monthly
+ggplot(Sino_month, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(.~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  labs(title="Sinocalanus doerrii")+
+  scale_fill_viridis_c()
+
+# with salinity
+ggplot(Sino_month, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(Salinity_zone~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  labs(title="Sinocalanus doerrii")+
+  scale_fill_viridis_c()
+```
+
+
+## Limno
+```{r}
+Limno <- MyZoopsF %>% 
+  filter(Species=="Limnoithona tetraspina") %>% 
+  mutate(Year=lubridate::year(Date), Julian=lubridate::yday(Date), Month=lubridate::month(Date))
+
+Limno_mean <- Limno %>% 
+  group_by(Species, Julian, Year, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+ggplot(Limno_mean, aes(Julian, meanCPUE, group=Year))+
+  geom_line(aes(color=Year), alpha=0.7)+
+  facet_grid(.~Salinity_zone, scales = "free_y")+
+  scale_color_viridis_c()+
+  labs(title="Limnoithona tetraspina", x="Julian date")
+
+Limno_month <- Limno %>% 
+  group_by(Species, Month, Year, Period, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+# identify peak month in each period - TBD
+
+# monthly
+ggplot(Limno_month, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(.~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  labs(title="Limnoithona tetraspina")+
+  scale_fill_viridis_c()
+
+# with salinity
+ggplot(Limno_month, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(Salinity_zone~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  labs(title="Limnoithona tetraspina")+
+  scale_fill_viridis_c()
+```
+
+
+
+
+## Bosmina
+```{r}
+Bosmina <- MyZoopsF %>% 
+  filter(Species=="Bosmina longirostris") %>% 
+  mutate(Year=lubridate::year(Date), Julian=lubridate::yday(Date), Month=lubridate::month(Date))
+
+Bosmina_mean <- Bosmina %>% 
+  group_by(Species, Julian, Year, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+ggplot(Bosmina_mean, aes(Julian, meanCPUE, group=Year))+
+  geom_line(aes(color=Year), alpha=0.7)+
+  facet_grid(.~Salinity_zone, scales = "free_y")+
+  scale_color_viridis_c()+
+  labs(title="Bosmina longirostris", x="Julian date")
+
+
+Bosmina_month <- Bosmina %>% 
+  group_by(Species, Month, Year, Period, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE))
+
+# identify peak month in each period - TBD
+
+# monthly
+ggplot(Bosmina_month, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(.~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  labs(title="Bosmina longirostris")+
+  scale_fill_viridis_c()
+
+# with salinity
+ggplot(Bosmina_month, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(Salinity_zone~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  labs(title="Bosmina longirostris")+
+  scale_fill_viridis_c()
+```
+
+
+# Import data from LTMR
+```{r}
+library(LTMRdata)
+
+BayStudyData <- fish(sources=c("Baystudy"),
+             species=NULL,
+             convert_lengths=TRUE,
+             size_cutoff=40,
+             zero_fill = TRUE,
+             remove_unknown_lengths = TRUE,
+             univariate = FALSE,
+             quiet = FALSE)
+str(BayStudyData)
+```
+
+# Filter fishes
+```{r}
+# Filter out forage fish species of interest
+BayStudySpp <- BayStudyData %>% 
+  mutate(Year=lubridate::year(Date), Julian=lubridate::yday(Date), Month=lubridate::month(Date)) %>% 
+  filter(Method=="Midwater trawl") %>% 
+  filter(Taxa == "Spirinchus thaleichthys" | 
+           Taxa == "Hypomesus transpacificus" |
+           Taxa == "Morone saxatilis" |
+           Taxa == "Alosa sapidissima" |
+           Taxa == "Dorosoma petenense" |
+           Taxa == "Clupea pallasii" |
+           Taxa == "Engraulis mordax") %>% 
+    filter(!is.na(Sal_surf))%>%
+  mutate(Salinity_zone=case_when(
+    Sal_surf < 0.5 ~ "Freshwater",
+    Sal_surf > 0.5 & Sal_surf < 6 ~ "Low salinity zone",
+    Sal_surf > 6 ~ "High salinity zone"
+  ))%>%
+  mutate(Salinity_zone=factor(Salinity_zone, levels=c("Freshwater", 
+                                                      "Low salinity zone", 
+                                                      "High salinity zone"))) %>% 
+  mutate(Period= case_when(
+    Year < 1987 ~ "Period1",
+    Year >= 1987 & Year <= 1994 ~ "Period2",
+    Year >= 1995 & Year <= 2006 ~ "Period3",
+    Year >= 2007 & Year <= 2016 ~ "Period4",
+    Year > 2016 ~ "Period5"
+  )) 
+head(BayStudySpp)
+
+# import Bay Study core station list - 19 total
+baystudy_annual <- read_csv("data/stations/stations_fish_BayStudy_annual.csv") %>% 
+  filter(Station>300) %>%  # San Pablo Bay lowest downstream extent
+  mutate(Station=as.character(Station)) %>% 
+  select(Station, Latitude, Longitude)
+dim(baystudy_annual)
+
+# Join them together- filter out catches from 19 core stations
+BayStudyF <- BayStudySpp %>% 
+  right_join(baystudy_annual)
+head(BayStudyCore)
+```
+
+
+# Map
+```{r}
+library(DT)
+library(leaflet)
+library(sf)
+library(s2)
+library(janitor)
+library(lwgeom)
+
+# 15 core stations
+BayStudyMap <- BayStudyF %>% 
+  distinct(Source, Station, Latitude, Longitude)
+
+leaflet() %>% 
+  addTiles() %>% 
+    addCircleMarkers(data = BayStudyMap, 
+                         lat = ~Latitude,
+                         lng = ~Longitude,
+                         radius = 4,
+                         weight = 0.1,
+                          color= "black",
+                          fillOpacity = 0.7)
+```
+
+## sampling
+```{r}
+Sampling2 <- BayStudyF %>% 
+  select(Source, Method, Station, Date, Julian, Year) %>% 
+  distinct() %>%  
+  filter(!is.na(Year)) %>% 
+  filter(Method=="Midwater trawl")
+
+ggplot(Sampling2, aes(Julian))+
+  geom_histogram(binwidth =1, aes(fill=Station))+
+  facet_wrap(Year~.)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  labs(title="Bay study", subtitle="Midwater trawl")
+
+
+Sampling2_b <- BayStudyF %>% 
+  select(Source, Method, Station, Date, Julian, Year) %>% 
+  distinct() %>%  
+  filter(!is.na(Year)) %>% 
+  filter(Method=="Midwater trawl", Year=="2015")
+
+ggplot(Sampling2_b, aes(Julian))+
+  geom_histogram(binwidth =1, aes(fill=Station))+
+  #facet_wrap(Year~.)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  labs(title="Bay study 2015", subtitle="Midwater trawl")
+```
+
+
+
+# Age class cutoffs
+From Kathy Hieb at CDFW
+
+
+Example - Longfin Smelt for June - All lengths are FL
+Age-0 includes min length to  < age-0 cutoff				    40-66
+Age 1+ >= age-cutoff					                          >=67
+Age1 >= age-0 to <age-1 cutoff					               67-107
+Age2+ >= age-1 cutoff					                          >=108
+
+```{r}
+BayStudyAges <- read_csv("BayStudy_AgeCutOffs.csv") %>% 
+  select(AlphaCode:Taxa) %>% 
+  rename(Month=Survey) # Survey num = month
+View(BayStudyAges)
+
+BayStudyFA <- BayStudyF %>% 
+  mutate(AgeClass= case_when(
+    # American Shad Age-0 vs. Age-1+
+    Taxa == "Alosa sapidissima" & Month <=4 & Length <= 30 ~ "Age0",
+    Taxa == "Alosa sapidissima" & Month == 5 & Length <= 60 ~ "Age0",
+    Taxa == "Alosa sapidissima" & Month == 6 & Length <= 70 ~ "Age0",
+    Taxa == "Alosa sapidissima" & Month == 7 & Length <= 95 ~ "Age0",
+    Taxa == "Alosa sapidissima" & Month == 8 & Length <= 110 ~ "Age0",
+    Taxa == "Alosa sapidissima" & Month == 9 & Length <= 145 ~ "Age0",
+    Taxa == "Alosa sapidissima" & Month == 10 & Length <= 165 ~ "Age0",
+    Taxa == "Alosa sapidissima" & Month == 11 & Length <= 170 ~ "Age0",
+    Taxa == "Alosa sapidissima" & Month == 12 & Length <= 170 ~ "Age0",
+    # Delta Smelt Age-0 vs. Age-1+
+    Taxa == "Hypomesus transpacificus" & Month == 1 & Length <= 40 ~ "Age0",
+    Taxa == "Hypomesus transpacificus" & Month == 2 & Length <= 50 ~ "Age0",
+    Taxa == "Hypomesus transpacificus" & Month == 3 & Length <= 50 ~ "Age0",
+    Taxa == "Hypomesus transpacificus" & Month == 4 & Length <= 50 ~ "Age0",
+    Taxa == "Hypomesus transpacificus" & Month == 5 & Length <= 50 ~ "Age0",
+    Taxa == "Hypomesus transpacificus" & Month == 6 & Length <= 55 ~ "Age0",
+    Taxa == "Hypomesus transpacificus" & Month == 7 & Length <= 65 ~ "Age0",
+    Taxa == "Hypomesus transpacificus" & Month == 8 & Length <= 70 ~ "Age0",
+    Taxa == "Hypomesus transpacificus" & Month == 9 & Length <= 75 ~ "Age0",
+    Taxa == "Hypomesus transpacificus" & Month == 10 & Length <= 80 ~ "Age0",
+    Taxa == "Hypomesus transpacificus" & Month == 11 & Length <= 80 ~ "Age0",
+    Taxa == "Hypomesus transpacificus" & Month == 12 & Length <= 80 ~ "Age0",
+    # Longfin Smelt Age-0 vs. Age-1+
+    Taxa == "Spirinchus thaleichthys" & Month == 1 & Length <= 40 ~ "Age0",
+    Taxa == "Spirinchus thaleichthys" & Month == 2 & Length <= 42 ~ "Age0",
+    Taxa == "Spirinchus thaleichthys" & Month == 3 & Length <= 46 ~ "Age0",
+    Taxa == "Spirinchus thaleichthys" & Month == 4 & Length <= 52 ~ "Age0",
+    Taxa == "Spirinchus thaleichthys" & Month == 5 & Length <= 59 ~ "Age0",
+    Taxa == "Spirinchus thaleichthys" & Month == 6 & Length <= 67 ~ "Age0",
+    Taxa == "Spirinchus thaleichthys" & Month == 7 & Length <= 71 ~ "Age0",
+    Taxa == "Spirinchus thaleichthys" & Month == 8 & Length <= 75 ~ "Age0",
+    Taxa == "Spirinchus thaleichthys" & Month == 9 & Length <= 80 ~ "Age0",
+    Taxa == "Spirinchus thaleichthys" & Month == 10 & Length <= 83 ~ "Age0",
+    Taxa == "Spirinchus thaleichthys" & Month == 11 & Length <= 85 ~ "Age0",
+    Taxa == "Spirinchus thaleichthys" & Month == 12 & Length <= 87 ~ "Age0",
+    # Northern Anchovy Age-0 vs. Age-1+
+    Taxa == "Engraulis mordax" & Length <= 90 ~ "Age0",
+    # Pacific Herring Age-0 vs. Age-1+ 
+    Taxa == "Clupea pallasii" & Month == 1 & Length <= 45 ~ "Age0",
+    Taxa == "Clupea pallasii" & Month == 2 & Length <= 50 ~ "Age0",
+    Taxa == "Clupea pallasii" & Month == 3 & Length <= 70 ~ "Age0",
+    Taxa == "Clupea pallasii" & Month == 4 & Length <= 85 ~ "Age0",
+    Taxa == "Clupea pallasii" & Month == 5 & Length <= 95 ~ "Age0",
+    Taxa == "Clupea pallasii" & Month == 6 & Length <= 105 ~ "Age0",
+    Taxa == "Clupea pallasii" & Month == 7 & Length <= 110 ~ "Age0",
+    Taxa == "Clupea pallasii" & Month == 8 & Length <= 120 ~ "Age0",
+    Taxa == "Clupea pallasii" & Month == 9 & Length <= 125 ~ "Age0",
+    Taxa == "Clupea pallasii" & Month == 10 & Length <= 125 ~ "Age0",
+    Taxa == "Clupea pallasii" & Month == 11 & Length <= 135 ~ "Age0",
+    Taxa == "Clupea pallasii" & Month == 12 & Length <= 140 ~ "Age0",
+    # Striped Bass 
+    Taxa == "Morone saxatilis" & Month == 1 & Length <= 165 ~ "Age0",
+    Taxa == "Morone saxatilis" & Month == 2 & Length <= 165 ~ "Age0",
+    Taxa == "Morone saxatilis" & Month == 3 & Length <= 170 ~ "Age0",
+    Taxa == "Morone saxatilis" & Month == 4 & Length <= 175 ~ "Age0",
+    Taxa == "Morone saxatilis" & Month == 5 & Length <= 60 ~ "Age0",
+    Taxa == "Morone saxatilis" & Month == 6 & Length <= 80 ~ "Age0",
+    Taxa == "Morone saxatilis" & Month == 7 & Length <= 90 ~ "Age0",
+    Taxa == "Morone saxatilis" & Month == 8 & Length <= 125 ~ "Age0",
+    Taxa == "Morone saxatilis" & Month == 9 & Length <= 135 ~ "Age0",
+    Taxa == "Morone saxatilis" & Month == 10 & Length <= 145 ~ "Age0",
+    Taxa == "Morone saxatilis" & Month == 11 & Length <= 155 ~ "Age0",
+    Taxa == "Morone saxatilis" & Month == 12 & Length <= 165 ~ "Age0",
+    # Threadfin Shad
+    Taxa == "Dorosoma petenense" & Length <= 500 ~ "Age0"
+  )) %>% 
+  filter(AgeClass=="Age0")
+```
+
+
+
+
+# Age-0 Species
+```{r}
+# Filter species of interest
+Fish_SppMonth <- BayStudyFA %>% 
+  group_by(Taxa, Month, Year, Period) %>% 
+  summarize(meanCPUE=mean(Count, na.rm=T)) %>% 
+  filter(Taxa>0) # remove NA
+
+# Identify the peaks for each species x period combination
+Fish_SppMonth_peaks <- Fish_SppMonth %>% 
+  ungroup() %>%
+  filter(Month>2 & Month < 11) %>% 
+  group_by(Taxa, Period, Month) %>% 
+  summarize(meanCPUE=median(meanCPUE)) %>% # median
+  filter(meanCPUE== max(meanCPUE)) %>% 
+  filter(meanCPUE != 0)
+
+# Plot monthly trends for each period
+ggplot(Fish_SppMonth, aes(Month, meanCPUE, group=Month, fill=Month))+
+  geom_vline(data=Fish_SppMonth_peaks, aes(xintercept = Month), lty=2, col="red")+
+  geom_boxplot(size=0.3, outlier.shape = 21, outlier.size = 0.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_grid(Taxa~Period, scales = "free_y")+
+  xlim(2.5,10.5)+
+  scale_fill_viridis_c()+
+  labs(title="Common forage fish species")
+
+
+# Identify the peaks but with standardized CPUE values for each species
+Fish_SppMonth_z <- Fish_SppMonth %>% 
+  ungroup() %>%
+  filter(Month>2 & Month < 11) %>% 
+  group_by(Taxa,Period,Month) %>% 
+  summarize(meanCPUE=mean(meanCPUE)) %>%
+  group_by(Taxa, Period) %>% 
+  mutate(meanCPUE2= mean(meanCPUE, na.rm=T), sd=sd(meanCPUE, na.rm = T)) %>% 
+  mutate(CPUEz= (meanCPUE - meanCPUE2) / sd) %>% 
+  ungroup()
+
+Fish_SppMonth_peaks_z <- Fish_SppMonth_z %>% 
+  group_by(Taxa, Period) %>% 
+  filter(CPUEz== max(CPUEz)) %>% 
+  filter(CPUEz != 0)
+
+# zscore CPUE
+ggplot(Fish_SppMonth_z, aes(x=Month, y=CPUEz, height=CPUEz, group=Period, fill=Period))+
+  geom_hline(aes(yintercept=0), lty=2, col="gray50")+
+  geom_ridgeline(min_height = -10, stat="identity")+
+  facet_grid(.~Taxa)+
+  theme_bw()+
+  scale_fill_viridis_d(alpha=0.5)
+
+# mean CPUE
+ggplot(Fish_SppMonth_z, aes(x=Month, y=meanCPUE, height=meanCPUE, group=Period, fill=Period))+
+  geom_ridgeline(min_height = -10, stat="identity")+
+  facet_grid(.~Taxa)+
+  theme_bw()+
+  scale_fill_viridis_d(alpha=0.5)
+```
+
+
+
+
+
+```{r}
+# Longfin smelt
+BayStudySuisun <- fish(sources=c("Suisun", "Baystudy"),
+                       species="Spirinchus thaleichthys",
+             convert_lengths=TRUE,
+             remove_unconverted_lengths=FALSE,
+             size_cutoff=40,
+             zero_fill = TRUE,
+             remove_unknown_lengths = TRUE,
+             univariate = FALSE,
+             quiet = FALSE)
+BayStudySuisun
+
+# Longfin smelt
+Lonsme <- BayStudySuisun %>% 
+  filter(Method=="Otter trawl")
+Lonsme$Month <- lubridate::month(Lonsme$Date)
+Lonsme$Year <- lubridate::year(Lonsme$Date)
+
+Lonsme2 <- Lonsme %>% 
+  filter(Month>3 & Month <11) %>%   # most consistent trawling effort for Bay Study
+  group_by(Year, Source, Station) %>% 
+  summarize(Count=sum(Count), Tow_area=sum(Tow_area), Tow_duration=sum(Tow_duration)) %>% 
+  mutate(CPUE= ifelse(Source=="Bay Study", Count/Tow_area, Count/Tow_duration)) %>%
+  mutate(Species="Longfin Smelt", Method="Otter trawl") %>% 
+  filter(Year>1979) 
+View(Lonsme2)
+
+ggplot(Lonsme2, aes(Year, CPUE))+
+  geom_line(aes(color=Station)) + 
+  theme_bw()
+```
+
+
+
+# Zooplankton varpart
+
+Step 1: calculate distances within the deltamapr polygon
+```{r}
+library(deltamapr)
+require(ggplot2)
+require(sf)
+```
+
+## spatial extent
+```{r}
+# Extract subregions of interest and combine
+regions <- deltamapr::R_EDSM_Subregions_Mahardja
+st_crs(regions) <- 26910
+plot(regions)
+
+waterways <- deltamapr::WW_Delta 
+st_transform(waterways, crs=4326)
+
+waterways2 <- waterways %>% 
+  mutate(Extent="Waterway") %>% 
+  group_by(Extent) %>% 
+  summarise()%>% 
+  st_make_valid()
+
+ggplot(regions)+
+  geom_sf(aes(fill=Region))+
+  geom_sf_label(aes(label=SubRegion), size=2) +
+  theme_bw()+
+  ggthemes::scale_fill_colorblind()
+
+Regions_mismatches <- regions %>%
+  filter(SubRegion %in% c("San Pablo Bay", "Carquinez Strait", "West Suisun Bay", 
+                          "Mid Suisun Bay", "Honker Bay", "Confluence", 
+                          "Lower Sacramento River", "Lower San Joaquin River", 
+                          "Sacramento River near Rio Vista", "San Joaquin River at Twitchell Island",
+                          "Grizzly Bay")) %>% 
+  mutate(Extent="Mismatch Study Extent") %>% 
+  group_by(Extent) %>% 
+  summarise()%>% 
+  st_make_valid() %>% 
+  st_transform(crs=4326) %>% 
+  sf::st_as_s2(rebuild=TRUE) %>% 
+  sf::st_as_sfc()
+plot(Regions_mismatches)
+
+
+# clip the waterway polygon to the region polygon
+#ww_clip <- st_intersection(Regions_mismatches, waterways2)
+#plot(ww_clip)
+```
+
+## 1 - zoop distances
+```{r}
+station_zoop <- tibble(lat=MyZoopsMap$Latitude, lon=MyZoopsMap$Longitude) 
+
+station_zoop_points <- st_as_sf(MyZoopsMap, coords = c("Longitude", "Latitude"), 
+                 crs= 4326, agr = "constant") %>% 
+                  st_transform(crs=4326) %>% 
+  mutate(ID=1:15) %>% 
+  filter(ID>4) %>% 
+  filter(ID != 11) %>% 
+  filter(ID != 13) %>% 
+  filter(ID != 7) %>% 
+  mutate(ID=1:8)
+
+# final list of stations
+zoop_station_list <- station_zoop_points %>% 
+  select(Station)
+zoop_station_list
+
+# final list of stations that match salinity table
+station_zoop6 <- tibble(Station=MyZoopsMap$Station, lat=MyZoopsMap$Latitude, lon=MyZoopsMap$Longitude) %>% 
+  filter(Station== "NZ028" | Station== "NZ048"| Station== "NZ054" | Station== "NZ060"|
+           Station=="NZ064" | Station == "NZD41")
+
+station_zoop_points6 <- station_zoop_points %>% 
+  filter(Station== "NZ028" | Station== "NZ048"| Station== "NZ054" | Station== "NZ060"|
+           Station=="NZ064" | Station == "NZD41")
+
+# upstream most station
+station_zoop_ref <- station_zoop_points %>% 
+  filter(Station=="NZ064")
+
+# clip stations to waterways
+#station_zoop_clip <- st_intersection(ww_clip, station_zoop_points)
+
+#Plot the spatial extent
+plot <- ggplot()+
+  geom_sf(data=Regions_mismatches)+
+  geom_sf(data=station_zoop_points, col="red")+
+  #scale_fill_grey(name="Region", start = 0.4)+
+  #scale_color_viridis_d(name="Survey")+
+  #scale_shape_manual(name="Survey", values=c(1,2,15,18,4))+
+  labs(title="Mismatches study extent", subtitle="1980 to present")+
+  theme_bw()
+plot
+
+# add all waterways
+ggplot()+
+  geom_sf(data=Regions_mismatches,color="gray90", alpha=0.5) +
+  #geom_sf(data=waterways2, color="slategray1", fill="slategray1") +
+  geom_sf(data=station_zoop_points, col="red")+
+  theme_bw()
+
+# add clipped waterways, with labels
+ggplot()+
+  #geom_sf(data=Regions_mismatches,color="gray90", alpha=0.5) +
+  #geom_sf(data=ww_clip, color="slategray1", fill="slategray1") +
+  geom_sf(data=station_zoop_points, col="red")+
+  theme_bw()+
+  geom_sf_label(data=station_zoop_points, aes(label=Station))
+
+# calculate Euclidean distances between 8 points (no bounding) in units of meters (m) then transform
+zoop_dist <- sf::st_distance(station_zoop_points, station_zoop_points, which = "Euclidean")
+zoop_dist
+
+# all 8 points
+Station <- c("NZD16", "NZ064", "NZ060", "NZ054", "NZ048", "NZ028", "NZD06", "NZD41")
+Dist <- c(0, 6400.284, 14659.032, 21748.739, 29107.359, 33370.744, 39826.917, 62091.305)
+zoop_dist_df <- tibble(Station, Dist)
+
+# calculate Euclidean distances between 5 points and one station further upstream
+zoop_dist_up <- sf::st_distance(station_zoop_points6, station_zoop_ref) # meters only, transform later with vegan
+zoop_dist_up
+# Units: [m]
+#           [,1]
+# [1,]     0.000
+# [2,]  8264.514
+# [3,] 15358.062
+# [4,] 22731.765
+# [5,] 27293.046
+# [6,] 55728.566
+
+# reorder the 6 stations with matching salinity values - according to zoop_env and zoop_spp
+Station <- c("NZD41", "NZ028", "NZ048", "NZ054", "NZ060", "NZ064")
+Dist <- c(55728.566, 27293.046, 22731.765, 15358.062, 8264.514, 0.000)
+zoop_dist_df <- tibble(Station, Dist)
+
+
+ggplot()+
+  geom_sf(data=Regions_mismatches,color="gray90", alpha=0.5) +
+  #geom_sf(data=ww_clip, color="slategray1", fill="slategray1") +
+  geom_sf(data=station_zoop_points6, col="red")+
+  theme_bw()+
+  geom_sf_label(data=station_zoop_points6, aes(label=Station))+
+  labs(title="Zooplankton and salinity stations")
+
+
+## for later if needed - calculate distances between points within the waterway polygon
+# library(sfnetworks)
+# https://stackoverflow.com/questions/68596244/can-i-bound-an-st-distance-call-by-a-polygon
+# https://luukvdmeer.github.io/sfnetworks/index.html
+# station_zoop_net <- sfnetwork(station_zoop_points, crs=4326)
+# station_zoop_net
+```
+
+## 2 - zoop salinities
+```{r}
+MyZoopsMeso <- MyZoopsF %>% 
+  filter(SizeClass == "Meso")
+View(MyZoopsMeso)
+
+# Filter species of interest
+MyZoopsMeso_SppSal <- MyZoopsMeso %>% 
+  filter(Species == "Eurytemora affinis" |
+          Species == "Pseudodiaptomus forbesi" |
+           Species=="Sinocalanus doerrii" |
+           Species=="Limnoithona tetraspina" |
+           Species=="Bosmina longirostris") %>%
+  group_by(Station, Month, Year, Species, Salinity_zone) %>% 
+  summarize(meanCPUE=mean(CPUE, na.rm=T), meanSalSurf=mean(SalSurf, na.rm=T)) %>% 
+  right_join(zoop_station_list, by="Station") %>% 
+  ungroup() %>%   
+  filter(Year>1994)
+
+View(MyZoopsMeso_SppSal)
+
+check <- MyZoopsMeso_SppSal %>%
+  ungroup() %>% 
+  distinct(Station)
+```
+
+```{r}
+MyZoopsSal <- MyZoopsMeso_SppSal %>% 
+  select(Station, Month, Year, meanSalSurf) %>% 
+  group_by(Station, Month, Year) %>% 
+  summarize(meanSalSurf=mean(meanSalSurf, na.rm=T)) %>% 
+  mutate(Day=1) %>% 
+  ungroup()
+
+check2 <- MyZoopsSal %>%
+  ungroup() %>%
+  distinct(Station)
+
+MyZoopsSal <- unite(MyZoopsSal, "Date", c("Month","Day","Year"), sep="/", remove = FALSE)
+MyZoopsSal$Date <- mdy(MyZoopsSal$Date)
+
+# For imputation - Long to wide format
+MyZoopsSal2 <- MyZoopsSal %>% 
+  select(Date, Station, meanSalSurf)%>% 
+  pivot_wider(id_cols = Date, names_from=Station, values_from=meanSalSurf, values_fill=NA) %>% 
+  arrange(Date)
+View(MyZoopsSal2)
+```
+
+```{r}
+# create a template of dates
+Date <- tibble(Date=seq(from=lubridate::as_date("1995-01-01"), 
+                        to=lubridate::as_date("2020-12-01"), by="1 month")) # 312*8 = 2496
+
+# create a new table with all combos
+sal_table <- Date %>% 
+  left_join(MyZoopsSal2, by="Date")
+```
+
+
+### arima imputation
+```{r, eval=FALSE}
+library(tidyverse)
+library(ggthemes)
+library(imputeTS)
+library(zoo)
+library(forecast)
+library(patchwork)
+library(sf)
+```
+
+Full model
+For-loop and model output
+```{r, eval=FALSE}
+# prep dataframe for for-loop
+salwodate <- sal_table %>% 
+  arrange(Date) #%>%  # ensure it's in chronological order
+salwodate <- salwodate[,-1] # then remove date and analyte columns
+salwodate <- log10(salwodate + 1) # add one and log10 transform
+summary(salwodate)
+head(salwodate) # 6 cols
+
+
+### Run this code altogether 
+#create an empty matrix
+Time_series_inter <- matrix(NA,nrow(salwodate),(ncol(salwodate))) #create empty matrix
+dim(Time_series_inter)
+colnames(Time_series_inter) <- colnames(salwodate)
+head(Time_series_inter)
+
+# Create a vector of years (for each month x year combo = 312)
+Year <- lubridate::year(sal_table$Date)
+
+## start for-loop, make sure to refresh Time_series_inter above
+for (i in 1:ncol(salwodate)) {
+  #create time-series object
+  dat_imp <- data.frame(Year, y = salwodate[,i])
+
+  y <- ts(dat_imp[2], start= c(1995,1), end = c(2020,12), frequency = 12) # time series object
+  
+  #add raw values into empty matrix
+  Time_series_inter[,i] <- dat_imp[,c(-1)] # removing the Year column c(-1)
+  
+  #interpolate missing values (if any)
+    if(length(which(is.na(y))) > 0){
+          
+        #fit ARIMA and impute missing values
+        fit <- auto.arima(y, seasonal = TRUE) # don't use lambda, already log10 transformed 
+        y_inter <- na_kalman(y,model=fit$model)
+
+        #identify missing values to impute (and replace in the matrix)
+        id.na <- which(is.na(y))
+
+        #remove missing values at the begining and end of time series
+        aa <- split(id.na, cumsum(c(1, diff(id.na) != 1)))  #split sequences of missing values 
+        last <- length(y)
+        first <- 1
+        is.first <- sapply(aa,function(x) length(which(x %in% first))) #identify series of NAs at the start of the time-series
+        is.last <- sapply(aa,function(x) length(which(x %in% last))) #idem with last value
+          
+        if(sum(is.first) > 0 | sum(is.last) > 0){
+            aa <- aa[-c(which(is.last == 1),which(is.first == 1))] #remove them from the list
+            id.na <- unlist(aa)
+        }
+
+        #replace missing values by imputed values into matrix
+        Time_series_inter[id.na,i] <- y_inter[id.na]
+
+# jpeg(paste0("Imputation_plots/salorophyll",colnames(Time_series_inter)[i],".jpeg"))
+# plot(y_inter,xlab="",ylab="salorophyll (C)",col="red",main=(Time_series_inter)[i])
+# lines(y,col="black")
+# mtext(side=3,text=paste("Station #",colnames(Time_series_inter)[i]),line=-1,adj=0.9)
+# dev.off()
+# 
+# 		}else{
+# 		#save plot for non-imputed time-series
+# 		jpeg(paste0("Imputation_plots/salorophyllRaw",colnames(Time_series_inter)[i],".jpeg"))
+# 		plot(y,xlab="",ylab="salorophyll (C)",col="black",main=(Time_series_inter)[i])
+# 		mtext(side=3,text=paste("Station #",colnames(Time_series_inter)[i]),line=-1,adj=0.9)
+# 		dev.off()
+		}
+    print(i)
+     
+}
+## end for-loop
+
+#output of imputation
+View(Time_series_inter)
+
+# back transform
+Time_series_inter2 <- 10^Time_series_inter -1
+
+# evaluate top model
+fit
+```
+
+Create new time series with interpolated values
+```{r, eval=FALSE}
+#show wide table of imputed values with dates and analyte type
+Time_series_imp_wide <- as_tibble(Time_series_inter2) %>% 
+  mutate(Date = sal_table$Date, Analyte= "Salinity") %>% # add columns back
+  select(Date, Analyte, NZ028:NZD41)  # rearrange columns
+
+Time_series_imp <- Time_series_imp_wide %>%
+  pivot_longer(
+    cols= "NZ028":"NZD41",
+    names_to="Station", 
+    values_to = "Imputed_values")
+View(Time_series_imp)
+summary(Time_series_imp)
+dim(Time_series_imp) # 1872 rows - only 49 NAs remaining
+
+# identify which values were imputed - which values DONT they have in common?
+# If Imputed_values has a value, where the raw data has an NA, and Missing=TRUE, it's imputed
+sal_table_long <- sal_table %>% 
+  pivot_longer(
+    cols="NZ028":"NZD41",
+    names_to="Station",
+    values_to = "Raw_values"
+  ) %>% 
+  mutate(Missing=ifelse(is.na(Raw_values), TRUE, FALSE)) # Is it missing?
+View(sal_table_long)
+summary(sal_table_long)
+dim(sal_table_long) # 1872 rows- with 108 NAs present
+
+# Join them to create a master table tracking which values were modeled
+# Should still be 10 NAs that are missing but not imputed
+Time_series_imp2 <- Time_series_imp %>% 
+  left_join(sal_table_long) %>% 
+  mutate(Imputed=ifelse(Missing==TRUE & Imputed_values>0, TRUE, FALSE)) 
+View(Time_series_imp2)
+```
+
+Diagnostic tests
+```{r, eval=FALSE}
+#Plot the observed and predicted salinity
+ggplot(Time_series_imp2, aes(Date, Imputed_values, color=Imputed))+
+  geom_line(aes(Date, Imputed_values), col="gray60")+  
+  geom_point(size=1)+
+  facet_wrap(Station~., ncol=3, scales = "free_y")+
+  scale_color_manual(values=c("gray60", "red", "black"))+
+  labs(title="Replacing missing values with ARIMA and Kalman filter", subtitle="Salinity")+
+  theme_bw()
+```
+
+```{r, eval=FALSE}
+# model summary
+summary(fit)
+
+# Check the residuals
+forecast::checkresiduals(fit)
+
+# Check several metrics of performance
+forecast::accuracy(object = fit)
+
+#plot residuals versus fitted values (=check for heterosedasticity)
+#if problems you might want to try to transform the data first
+par(mar=c(4,4,4,4))
+plot(fit$fitted, fit$residuals,ylab="Residuals",xlab="Fitted values")
+```
+
+Export df
+```{r, eval=FALSE}
+Time_series_imp2 %>% write_csv("mismatches_salinity_imputed_data.csv")
+```
+
+Re-import df
+```{r, eval=TRUE}
+Time_series_imp2 <- read_csv("mismatches_salinity_imputed_data.csv")
+```
+
+Make wide dataframe
+```{r, eval=TRUE}
+Time_series_imp3 <- Time_series_imp2 %>% 
+  select(Date, Station, Imputed_values) %>% 
+  filter(!is.na(Imputed_values))
+View(Time_series_imp3)
+```
+
+
+## 3 - zoop abundances
+```{r}
+MyZoopsMeso_Spp <- MyZoopsMeso_SppSal %>% 
+  mutate(Day=1)
+MyZoopsMeso_Spp <- unite(MyZoopsMeso_Spp, "Date", c("Month","Day","Year"), sep="/", remove = FALSE)
+MyZoopsMeso_Spp$Date <- lubridate::mdy(MyZoopsMeso_Spp$Date)
+
+MyZoopsMeso_Spp_w <- MyZoopsMeso_Spp %>% 
+  select(Date, Station, Species, meanCPUE) %>% 
+  pivot_wider(id_cols=c("Date", "Station"), names_from="Species", values_from="meanCPUE")
+
+# find the common samples - both salinity and zoops
+MyZoopsCompleteSamples <- MyZoopsMeso_Spp_w %>% 
+  inner_join(Time_series_imp3, by=c("Date", "Station")) %>% 
+  rename(salimp=Imputed_values) %>% 
+  arrange(Date,Station) %>% 
+  #left_join(zoop_dist_df, by="Station") # use this for precalculated distances
+  left_join(station_zoop6, by="Station") %>% 
+  mutate(Total=`Bosmina longirostris` + `Eurytemora affinis` + `Limnoithona tetraspina` +
+                     `Pseudodiaptomus forbesi` + `Sinocalanus doerrii`) %>% 
+  filter(Total>0)
+View(MyZoopsCompleteSamples)
+
+# for vegan package
+zoop_env <- MyZoopsCompleteSamples %>% 
+  select(Station, Date, salimp)
+zoop_env <- unite(zoop_env, "Station_date", c("Station", "Date"), remove=TRUE)
+zoop_env <- zoop_env %>% 
+  column_to_rownames("Station_date")
+View(zoop_env)
+summary(zoop_env)
+
+# for vegan package
+zoop_spp <- MyZoopsCompleteSamples %>% 
+  select(-salimp, -lat, -lon)
+zoop_spp <- unite(zoop_spp, "Station_date", c("Station", "Date"), remove=TRUE)
+zoop_spp <- zoop_spp %>% 
+  column_to_rownames("Station_date") 
+View(zoop_spp)
+summary(zoop_spp)
+
+# for vegan package
+zoop_latlon <- MyZoopsCompleteSamples %>%
+  #select(Station, Date, Dist) %>% #for precalculated distances
+  select(Station, Date, lat, lon)
+zoop_latlon <- unite(zoop_latlon, "Station_date", c("Station", "Date"), remove=TRUE)
+zoop_latlon <- zoop_latlon %>% 
+  column_to_rownames("Station_date")
+View(zoop_latlon)
+summary(zoop_latlon)
+
+# for vegan package
+zoop_date <- MyZoopsCompleteSamples %>%
+  select(Station,Date)
+zoop_date <- unite(zoop_date, "Station_date", c("Station", "Date"), remove=FALSE)
+zoop_date <- zoop_date %>% 
+  select(Station_date, Date) %>% 
+  column_to_rownames("Station_date")
+View(zoop_date)
+summary(zoop_date)
+```
+
+## 4 - zoop varpart
+
+## load packages
+```{r}
+#install.packages ('vegan')
+library(vegan)
+```
+
+
+Tutorial URL: https://www.davidzeleny.net/anadat-r/doku.php/en:varpart_examples
+
+*Functions*
+varpart (library vegan) - variation partitioning (using RDA, CCA or db-RDA) among up to four matrices of environmental variables. The first argument (Y) is the dependent variable, usually the matrix of species composition (the function calculates RDA, or, if chisquare = TRUE, CCA), but could be also only a single variable (in that case it calculates linear regression) or distance matrix (applying db-RDA using the function capscale). Further arguments (up to four) are (groups of) explanatory variables. The function uses either formula interface (with ~, see examples) or matrices. The interpretation should be based on adjusted R2, although raw R2 is also reported (for CCA, adjusted R2 is calculated by permutation method of Peres-Neto et al. 2006 and may slightly vary between re-analyses of the same data; the argument permutations specifies the number of permutations used to calculate adjusted R2 in CCA).
+
+plot.varpart (library vegan) - draws Venn's diagram with fractions of explained variation. In default setting it doesn't show negative values of explained variation (argument cutoff = 0). The function can use arguments of showvarparts below, e.g. to add the labels for individual (groups of) variables (argument Xnames), or colours of the fractions (argument bg). Consult ?plot.varpart for more details.
+
+showvarparts (library vegan) - draws schema of Venn's diagram with codes of individual fractions.
+
+*Description of the dataset*
+The experiment was focused on diversity and species richness of weed communities in barley fields after application of industrial fertilizers. The experiment was originally established as a part of hydrobiological research, and for practical reasons it was not established using properly randomized design - individual plots are practically pseudoreplications, but for the purpose of this exercise we ignore it.
+
+All together 122 plots of the size 1 m2 were fertilized by three different fertilizers (for the purpose of this study the types of fertilizers are not distinguished), and on each plot species composition of weed community was recorded (with species covers estimated using ordinal scale from 1 to 7). Fertilizing simultaneously influences also growth and cover of barley, and the cover of barley can in turn also influence species composition of weeds; for this reason, the barley cover in the plot was also recorded.
+
+## import data
+```{r}
+fertil.spe <- read.delim ('https://raw.githubusercontent.com/zdealveindy/anadat-r/master/data/fertil.spe.txt', row.names = 1)
+fertil.env <- read.delim ('https://raw.githubusercontent.com/zdealveindy/anadat-r/master/data/fertil.env.txt', row.names = 1)
+```
+
+Species data in fertil.spe are represented by the estimated cover of weed community species in a plot, and it is not necessary to transform them. One may first apply DCA ordination on species data to see the length of the first DCA axis and hence seek the recommendation whether the linear or unimodal method should be used (the length is 3.8 S.D., lying in a grey zone between 3 and 4 S.D.); we will use Redundancy analysis (RDA) here.
+
+First, let's see how would the variation partitioning looks like if we do it step-by-step manually (without using varpart function). We will partition variation explained by variables dose and cover from fertil.env. For this, we need to define the global model (to see how much variation is explained by both of them), and also models with simple (marginal) effect of each explanatory variable:
+
+## model 1 - manual
+```{r}
+# fractions [a+b+c]:
+rda.all <- rda (fertil.spe ~ dose + cover, data = fertil.env)
+# fractions [a+b]:
+rda.dose <- rda (fertil.spe ~ dose, data = fertil.env)
+# fractions [b+c]:
+rda.cover <- rda (fertil.spe ~ cover, data = fertil.env)
+```
+
+Now we can calculate variations explained by individual fractions (using RsquareAdj function):
+```{r}
+## fraction [a+b+c]
+RsquareAdj (rda.all)
+# $`r.squared`
+# [1] 0.1430381
+# 
+# $adj.r.squared
+# [1] 0.1286354
+abc <- RsquareAdj (rda.all)$adj.r.squared
+ 
+## fraction [a+b]:
+RsquareAdj (rda.dose)
+# $`r.squared`
+# [1] 0.06889364
+# 
+# $adj.r.squared
+# [1] 0.06113442
+ab <- RsquareAdj (rda.dose)$adj.r.squared
+ 
+## fraction [b+c]:
+RsquareAdj (rda.cover)
+# $`r.squared`
+# [1] 0.09628412
+# 
+# $adj.r.squared
+# [1] 0.08875315
+bc <- RsquareAdj (rda.cover)$adj.r.squared
+```
+
+In this way, we calculated adjusted R2 of fractions [a+b+c], [a+b] and [b+c]. To calculate values for individual fractions [a], [b] and [c], we need to do a simple subtractions:
+
+```{r}
+b <- ab + bc - abc  # 0.02125216
+a <- ab - b         # 0.03988225
+c <- bc - b         # 0.06750099
+```
+
+
+After recalculating into percentage, we get:
+
+[a] = 4.0%
+[b] = 2.1%
+[c] = 6.8%
+Conditional effect of dose (fraction [a] = 4.0%) is slightly lower than conditional effect of cover ([c] = 6.8%), and shared variance is not too high ([b] = 2.1%). Seems that weed species composition is more affected by light conditions modified by increasing cover of barley, than by fertilizer itself.
+
+Now, let's see the same, using function varpart (note that by default, varpart function calculates RDA on the matrices; if you want to use CCA, you need to use argument chisquare = TRUE).
+
+## model 2 - varpart
+```{r}
+varp <- varpart (fertil.spe, ~ dose, ~ cover, data = fertil.env)
+varp
+```
+
+```{r}
+varp_zoop2 <- varpart(vegdist(zoop_spp, method="bray"), zoop_env, zoop_latlon)
+varp_zoop2
+
+varp_zoop3 <- varpart(vegdist(zoop_spp, method="bray"), zoop_env, zoop_latlon, zoop_date)
+varp_zoop3
+```
+Partition of squared Bray distance in dbRDA 
+
+Call: varpart(Y = vegdist(zoop_spp), X = zoop_env, zoop_eucdist)
+
+Explanatory tables:
+X1:  zoop_env
+X2:  zoop_eucdist 
+
+No. of explanatory tables: 2 
+Total variation (SS): 354.84 
+No. of observations: 1764 
+
+Partition table:
+                     Df R.squared Adj.R.squared Testable
+[a+b] = X1            1   0.16939       0.16892     TRUE
+[b+c] = X2            1   0.28182       0.28142     TRUE
+[a+b+c] = X1+X2       2   0.33368       0.33292     TRUE
+Individual fractions                                    
+[a] = X1|X2           1                 0.05150     TRUE
+[b]                   0                 0.11742    FALSE
+[c] = X2|X1           1                 0.16400     TRUE
+[d] = Residuals                         0.66708    FALSE
+
+Use function ‘dbrda’ to test significance of fractions of interest
+
+```{r}
+#Plot all the variables of interest, do any variables seem highly related to
+#the geographic variables?
+rda.both <- rda(zoop_spp, zoop_env, zoop_latlon)
+plot(rda.both, choices=c(1,2), type="text")
+
+#Let's see how our just environmental data looks
+rda.env <- rda(zoop_spp ~., data=zoop_env)
+plot(rda.env, choices=c(1,2), type="text")
+
+#Let's also see how things look just based on latitude and longitude.
+#Does it look like some variance is explained just by geographical gradients?
+rda.geo <- rda(zoop_spp ~ ., data=zoop_latlon)
+plot(rda.geo, choices=c(1,2), type="text")
+```
+
+
+Partition of variance in RDA 
+
+Call: varpart(Y = fertil.spe, X = ~dose, ~cover, data = fertil.env)
+
+Explanatory tables:
+X1:  ~dose
+X2:  ~cover 
+
+No. of explanatory tables: 2 
+Total variation (SS): 2581.2 
+            Variance: 21.332 
+No. of observations: 122 
+
+Partition table:
+                     Df R.squared Adj.R.squared Testable
+[a+b] = X1            1   0.06889       0.06113     TRUE
+[b+c] = X2            1   0.09628       0.08875     TRUE
+[a+b+c] = X1+X2       2   0.14304       0.12864     TRUE
+Individual fractions                                    
+[a] = X1|X2           1                 0.03988     TRUE
+[b]                   0                 0.02125    FALSE
+[c] = X2|X1           1                 0.06750     TRUE
+[d] = Residuals                         0.87136    FALSE
+
+Use function ‘rda’ to test significance of fractions of interest
+
+The results for individual fractions are identical with our results above. varpart reports also simple (marginal) effect (both not-adjusted and adjusted variation) of individual predictors, i.e. fractions [a+b] and [b+c].
+
+We may plot the results into Venn's diagram (argument digits influences number of decimal digits shown in the diagram, Xnames the displayed names of variables, and bg background color of the diagram fractions; see ?varpart for details):
+
+## plot venn-diagram
+```{r}
+plot (varp, digits = 2, Xnames = c('dose', 'cover'), bg = c('navy', 'tomato'))
+```
+
+```{r}
+plot (varp_zoop2, digits = 2, Xnames = c('salinity', 'lat/lon'), bg = c('navy', 'tomato'))
+plot (varp_zoop3, digits = 2, Xnames = c('salinity', 'lat/lon', 'date'), bg = c('navy', 'tomato', 'gray'))
+```
+
+
+Now, when we know both simple and conditional effect of each variables, we may want to know whether these variances are significant, and hence worth of interpreting. Results from varpart contain the column testable with logical values indicating whether given fraction is testable or not. To test each of them, we will need the models defined above, and the function anova, which (if applied on single object resulting from rda or cca method, returns Monte Carlo permutation test of the predictor effect). For this, we need to first define also partial ordination models with one variable as exlanatory and the other as covariable (Condition):
+
+```{r}
+# fraction [a]:
+rda.dose.cover <- rda (fertil.spe ~ dose + Condition (cover), data = fertil.env)
+# fraction [c]:
+rda.cover.dose <- rda (fertil.spe ~ cover + Condition (dose), data = fertil.env)
+```
+
+```{r}
+# for varp_zoop2
+
+# fraction [a]
+rda.sal.dist <- rda(zoop_spp ~ zoop_env$salimp + Condition(zoop_latlon$lat + zoop_latlon$lon))
+rda.sal.dist
+# fraction [c]
+rda.dist.sal <- rda(zoop_spp ~ zoop_latlon$lat + zoop_latlon$lon + Condition(zoop_env$salimp))
+rda.dist.sal
+
+
+## The global model (fractions [a+b+c]): # sig - 0.006
+anova(rda.both)
+
+## Simple (marginal) effect of salimp (fraction [a+b]): # sig - 0.005
+anova(rda.env)
+
+## ## Simple (marginal) effect of Dist (fraction [b+c]): # sig - 0.04
+anova(rda.geo)
+
+## Conditional (partial) effect of salimp (fraction [a]): # sig - 0.01
+anova(rda.sal.dist)
+
+## Conditional (partial) effect of Dist (fraction [c]): # not sig
+anova(rda.dist.sal)
+```
+
+
+Then, to test individual fractions, we use:
+
+```{r}
+## The global model (fractions [a+b+c]):
+anova (rda.all)
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 999
+# 
+# Model: rda(formula = fertil.spe ~ dose + cover, data = fertil.env)
+# Df Variance      F Pr(>F)    
+# Model      2   3.0513 9.9313  0.001 ***
+#   Residual 119  18.2808                  
+# ---
+#   Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+ 
+## Simple (marginal) effect of dose (fraction [a+b]):
+anova (rda.dose)
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 999
+# 
+# Model: rda(formula = fertil.spe ~ dose, data = fertil.env)
+# Df Variance      F Pr(>F)    
+# Model      1   1.4696 8.8789  0.001 ***
+#   Residual 120  19.8624                  
+# ---
+#   Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+ 
+## ## Simple (marginal) effect of cover (fraction [b+c]):
+anova (rda.cover)
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 999
+# 
+# Model: rda(formula = fertil.spe ~ cover, data = fertil.env)
+# Df Variance      F Pr(>F)    
+# Model      1   2.0539 12.785  0.001 ***
+#   Residual 120  19.2781                  
+# ---
+#   Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+ 
+## Conditional (partial) effect of dose (fraction [a]):
+anova (rda.dose.cover)
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 999
+# 
+# Model: rda(formula = fertil.spe ~ dose + Condition(cover), data = fertil.env)
+# Df Variance      F Pr(>F)    
+# Model      1   0.9974 6.4924  0.001 ***
+#   Residual 119  18.2808                  
+# ---
+#   Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+ 
+## Conditional (partial) effect of cover (fraction [c]):
+anova (rda.cover.dose)
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 999
+# 
+# Model: rda(formula = fertil.spe ~ cover + Condition(dose), data = fertil.env)
+# Df Variance      F Pr(>F)    
+# Model      1   1.5817 10.296  0.001 ***
+#   Residual 119  18.2808                  
+# ---
+#   Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+```
+
+From these results, you may see that all simple (marginal) and conditional (partial) effects of both predictors are significant at P < 0.001.
+
+
+# Fish varpart
+```{r}
+# MWT data
+Fish_SppMonthStn <- BayStudyFA %>% 
+  group_by(Station, Date, Taxa) %>% 
+  summarize(meanCPUE=mean(Count, na.rm=T)) %>% 
+  pivot_wider(id_cols=c("Station", "Date"), names_from="Taxa", values_from="meanCPUE", values_fill = 0) %>% 
+  mutate(Total= `Engraulis mordax` + `Clupea pallasii` + `Spirinchus thaleichthys` + `Morone saxatilis` +
+           `Dorosoma petenense` + `Alosa sapidissima` + `Hypomesus transpacificus`) %>% 
+  filter(Total>0) %>% 
+  select(-Total)
+View(Fish_SppMonthStn)
+summary(Fish_SppMonthStn)
+
+Fish_stn_date <- Fish_SppMonthStn %>% 
+  select(Station, Date)
+
+Fish_sal <- BayStudyFA %>% 
+  group_by(Station, Date) %>% 
+  summarize(meanSal = mean(Sal_surf, na.rm=TRUE)) %>% 
+  right_join(Fish_stn_date, by = c("Station", "Date"))
+summary(Fish_sal)
+
+Fish_geo <- BayStudyFA %>% 
+  select(Station) %>% 
+  distinct() %>% 
+  left_join(BayStudyMap, by="Station") %>% 
+  select(Station, Latitude, Longitude)
+
+Fish_CompleteSamples <- Fish_SppMonthStn %>% 
+  left_join(Fish_sal, by = c("Station", "Date")) %>% 
+  left_join(Fish_latlon, by="Station")
+summary(Fish_CompleteSamples)
+
+# for vegan
+fish_spp <- Fish_SppMonthStn
+fish_spp <- unite(fish_spp, "Station_date", c("Station", "Date"), remove=TRUE)
+fish_spp <- fish_spp%>% 
+  column_to_rownames("Station_date")
+dim(fish_spp)
+
+fish_env <- Fish_sal
+fish_env <- unite(fish_env, "Station_date", c("Station", "Date"), remove=TRUE)
+fish_env <- fish_env %>% 
+  column_to_rownames("Station_date")
+dim(fish_env)
+
+fish_latlon <- Fish_CompleteSamples %>% 
+  select(Station, Date, Latitude, Longitude)
+fish_latlon <- unite(fish_latlon, "Station_date", c("Station", "Date"), remove=TRUE)
+fish_latlon <- fish_latlon %>% 
+  column_to_rownames("Station_date")
+dim(fish_latlon)
+```
+
+```{r}
+fish_varpart <- varpart(vegdist(fish_spp, method="bray"), fish_env, fish_latlon)
+fish_varpart
+
+plot (fish_varpart, digits = 2, Xnames = c('salinity', 'lat/lon'), bg = c('navy', 'tomato'))
+```
+
+
+# Peak timing: peak, range, CV on an annual basis
+- Tidyverse “Slicemax” function to ID peaks
+- Plot distributions of CVs of peak timing - fish vs. zoop
+- Regressions between peak timing and environmental variables (depth, salinity, temperature, secchi, flow)
+
+## Zoop
+```{r}
+
+```
+
+## Fish
+```{r}
+
+```
+
